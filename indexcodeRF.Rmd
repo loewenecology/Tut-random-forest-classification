@@ -1,0 +1,719 @@
+---
+title: Tutorial on random forest classification and variable/interaction importance
+author: "Charlie Loewen"
+date: "04/Dec/2021"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+https://loewenecology.wordpress.com/
+
+https://github.com/loewenecology/Tut-random-forest-classification
+
+There are a few options for building and visualizing random forests, just as there are several tools for solving the types of classification and regression problems to which they commonly apply. Here, we will use the `randomForestSRC` package (Ishwaran & Kogalur 2021) to generate an ensemble of classification decision trees, evaluate the importance of class predictors (and their interactions), and work through some visualization options to help us understand the results. For this demonstration, we will use phytoplankton community data from Alberta, Canada, building on a previous tutorial where we applied bipartite modularity analysis to detect recurrent groups of species and the sites at which they occur. Specifically, we apply the random forest algorithm to assess both the environmental predictors of site classification and trait predictors of species classification revealed in our prior analysis of the data (https://loewenecology.github.io/Tut-bipartite-modularity-analysis/).
+
+While detailed knowledge of phytoplankton ecology is not a prerequisite for this tutorial, readers should have some general background in freshwater/community ecology and understanding or interest in common machine learning and statistical tools used to assess environmental and biological constraints on communities (e.g. regression). I also assume some proficiency with `R`, including setting up projects, installing packages, and wrangling data in preparation for analysis or visualization.
+
+### Objectives
+
+#### <a href="#section1"> 1. Background</a>
+
+#### <a href="#section2"> 2. Assessing environmental predictors of communities</a>
+
+#### <a href="#section2.1"> 2.1 Preparing the data</a>
+
+#### <a href="#section2.2"> 2.2 Variable selection</a>
+
+#### <a href="#section2.3"> 2.3 Growing the forest</a>
+
+#### <a href="#section2.4"> 2.4 Variable dependence</a>
+
+#### <a href="#section2.5"> 2.5 Finding variable interactions</a>
+
+#### <a href="#section3"> 3. Assessing trait predictors of communities</a>
+
+#### <a href="#section4"> 4. Conclusions</a>
+
+#### <a href="#section5"> 5. Final thoughts</a>
+
+---------------------------
+
+<a name="section1"></a>
+
+## 1. Background
+
+Random forest is a machine learning algorithm that can be used for both classification and regression problems. It is a _supervised learning_ approach, as  forests are trained on 'labeled' data to classify or predict outcomes (though clustering variants also exist). This contrasts _unsupervised learning_ (e.g. modularity or principal component analysis), which organize 'unlabeled' data to find groups.
+
+Random forest is a non-parametric method that works by generating an ensemble of independent decision trees and either averaging their predictions (for regression problems) or choosing the most popular classes (i.e. vote counting for classification problems; Breiman 2001). Making up the forests, individual decision trees can be thought of as flowcharts used to represent how data is repeatedly split into smaller and smaller groups with similar attributes (for an example, see section 2.3 below). Splits occur at nodes, which define conditional statements for placing observations into one of two proceeding branches. However, single trees are prone to overfitting, where an excessive number of splits might perfectly partition the data but offer limited predictive power or generality to other cases. Thus, while intuitive and easy to explain, small changes in the data can lead to major differences in the structure of decision trees.
+
+By aggregating a large number of trees (many thousands), random forests overcome the high variance of single models and produce more accurate predictions as error rates stabilize (Breiman 2001). Trees in a forest are trained on a bootstrap sample of observations with splits chosen from a random sample of candidate predictors, permitting cross-validation with the unused (out-of-bag) data at each step. This internal validation makes random forests a valuable predictive tool that can reveal nonlinear effects in massive, high-dimensional datasets with missing values (Ishwaran et al. 2010). While Breiman's original implementation is available with the `randomForest` package (Liaw & Wiener 2002), we will take advantage of several features in the `randomForestSRC` package (Ishwaran & Kogalur 2021), which offers parallel processing as well as useful options for selecting variables/features, visualizing results, and finding variable interactions.
+
+<a name="section2"></a>
+
+## 2. Assessing environmental predictors of communities
+
+<a name="section2.1"></a>
+
+## 2.1 Preparing the data
+
+For this tutorial, we will use `R` software (https://www.r-project.org/). We start by opening R, setting the working directory, and loading the `randomForestSRC` (Ishwaran & Kogalur 2021) and `tidyverse` packages (Wickham et al. 2019). Here, we will invoke a mix of tidyverse and base R procedures to wrangle data in preparation for analysis.
+
+```{r}
+# Load libraries
+library(randomForestSRC)
+library(tidyverse)
+```
+
+Next, we will read in our ecological data. Data should consist of predictors (environmental variables or traits) as columns and observations (sites or species) as rows. For this demonstration, we will use data on phytoplankton communities in lakes and reservoirs across Alberta, Canada (see Loewen et al. 2020 and Loewen et al. 2021 for details). These community data were previously analyzed to classify groups of recurrent species and sites with similar biota (using an unsupervised implementation of bipartite modularity analysis; see https://loewenecology.github.io/Tut-bipartite-modularity-analysis/). Here, we apply random forests to assess both the environmental predictors of site classes and trait predictors of species classes to help us understand the formative processes and potential trait filters underlying community differentiation. We will load in the results of our prior modularity analysis, along with with supporting environmental and trait data. 
+
+All of these data have been archived at https://github.com/loewenecology/Tut-random-forest-classification for convenience. However, the raw environmental and species data were generated by the Alberta Government and Alberta Lake Management Society Lakewatch Program, and are available for download from the Dryad Digital Repository (https://doi.org/10.5061/dryad.gf1vhhmk7). Trait data for sampled species were assembled in Supporting Information 2 in Loewen et al. (2021) at: https://doi.org/10.1002/lno.11694.
+
+```{r}
+# Read the site module data
+phyto.site.mods <- read.csv("bin.aug.DIRT.site.mods.csv", header = T)
+
+# Read the species module data
+phyto.sp.mods <- read.csv("bin.aug.DIRT.sp.mods.csv", header = T)
+
+# Read the environmental data
+phyto.env <- read.csv("Loewen_et_al._2020._Ecol_App._Environmental_data_-_final.csv", header = T)
+phyto.env.aug <- subset(phyto.env, Month == "Aug")
+rownames(phyto.env.aug) <- phyto.env.aug$Lake.Name
+
+# Read the phytoplankton trait data
+phyto.traits <- read.csv("lno11694-sup-0002-supinfo02.csv", header = T)
+phyto.traits$SPECIES.NAME <- gsub(" ", ".", phyto.traits$SPECIES.NAME)
+phyto.traits$SPECIES.NAME <- gsub("\\.\\.", ".", phyto.traits$SPECIES.NAME)
+rownames(phyto.traits) <- phyto.traits$SPECIES.NAME
+
+# Merge site module and environmental data
+phyto.site.mods <- merge(phyto.site.mods, phyto.env.aug[, 6:46], by = 0)
+rownames(phyto.site.mods) <- phyto.site.mods$Row.names
+phyto.site.mods <- phyto.site.mods[, -1]
+phyto.site.mods$Mods <- as.factor(phyto.site.mods$Mods)
+
+# Merge species module and trait data
+phyto.sp.mods <- merge(phyto.sp.mods, phyto.traits, by = 0)
+rownames(phyto.sp.mods) <- phyto.sp.mods$Row.names
+phyto.sp.mods <- phyto.sp.mods[, -1]
+phyto.sp.mods$Mods <- as.factor(phyto.sp.mods$Mods)
+traits <- phyto.sp.mods[, c("GALD", "N.FIXING", "BUOYANCY", "SILICA_USING", "FLAGELLA", "HETEROTROPHY", "PHYCOBILINS",
+                            "CHL_C", "CHL_B", "CHAIN.COLONY", "MUCILAGINOUS_SHEATH", "SPINES", "SUSPECTED_TOXIN_PRODUCING")]
+```
+
+<a name="section2.2"></a>
+
+## 2.2 Variable selection
+
+While random forests are capable of handling exceptionally high dimensional data with reasonably stable error rates, correlated predictors still present a problem for interpretation and may bias estimates of variable importance. For example, an unrelated variable correlated with a predictive one may be chosen at a given split simply because of the  correlation. The variables may also compete at splits where both are candidates, causing them to have similar, but ultimately smaller, importance estimates. For these reasons, it is useful to consider variable selection to reduce predictor multicollinearity and mitigate overfitting.
+
+Looking at the environmental data, there are several variables that we might expect to be correlated. We can visualize simple correlations between candidate predictors with a heatmap based on Pearson (or other) correlation coefficients. This can be easily obtained with the _cor_ function and plotted with the `corrplot` package (Wei & Simko 2021).
+
+```{r}
+# Load library
+library(corrplot)
+
+# Obtain simple correlation matrix from environmental candidate variables
+phyto.site.mods.cor <- cor(phyto.site.mods[, 11:50])
+```
+
+```{r, fig.width=10, fig.height=10}
+# Obtain a quick plot using corrplot with order of variables based on first principal component
+phyto.site.mods.cor.plot <- corrplot(phyto.site.mods.cor, method = 'circle', 
+                                     type = "upper", order = 'FPC', diag = FALSE)
+```
+
+We can see a number of water quality parameters that are closely related in the top left portion of the plot (dark blue circles), including several related to ion chemistry and nutrient concentrations. We also see some parameters with strong negative correlations, including cropland and intact forest land covers. Random forests will struggle to differentiate between these correlated features, which should be reduced, but taken into account, during our final interpretations.
+
+While there are a few options for variable selection with random forests (see Speiser et al. 2019 for a review of common methods), most involve some ranking of permutation-based variable importance. With these approaches, importance is estimated from the change in error rate when variables are randomly permuted (or 'noised up'). Little change in classification success when a variable is randomized suggests it is not very important.
+
+One useful package for permutation-based variable selection is VSURF (Genuer et al. 2015), which applies a three-step strategy that starts by ranking variables by their importance estimates and dropping poor predictors in a thresholding step. After eliminating variables with average importance below a defined threshold, VSURF proceeds with an interpretation step that compares a series of nested random forests and selects variables from the model with the lowest error rate. Finally, a prediction step invokes forward stepwise selection, sequentially adding ranked variables only if the decrease in prediction error is significantly greater than that expected from a random variable. This method can be implemented with efficient parallel using the `VSURF` package (Genuer et al. 2019), and can be used to obtain different subsets of variables depending on their intended use for either interpretation or prediction.
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Load libraries
+library(VSURF)
+library(parallel)
+
+# Create formula with all possible variables
+names <- colnames(phyto.site.mods[, 11:51])
+phyto.site.mods.all.fmla <- as.formula(paste("Mods ~ ", paste(names, collapse = "+")))
+
+# Set seed for reproducibility
+set.seed(100, kind = "L'Ecuyer-CMRG")
+
+# Use VSURF to perform feature selection (in parallel) based on permutation-based variable importance
+phyto.site.mods.vsurf <- VSURF(phyto.site.mods.all.fmla,
+                               data = phyto.site.mods,
+                               ntree = 20000,
+                               mtry = sqrt(41),
+                               nfor.thres = 500,
+                               nmin = 1,
+                               nfor.interp = 250,
+                               nsd = 1,
+                               nfor.pred = 250,
+                               nmj = 1,
+                               RFimplem = "randomForest",
+                               parallel = TRUE,
+                               ncores = parallel::detectCores() - 1,
+                               clusterType = "PSOCK",
+                               verbose = TRUE)
+```
+
+```{r}
+# Report VSURF results
+summary(phyto.site.mods.vsurf)
+```
+
+```{r, fig.width=8, fig.height=6}
+# Plot VSURF results
+plot(phyto.site.mods.vsurf)
+```
+
+Here, we can see that the VSURF procedure selected 38 variables at the thresholding step, 19 at the interpretation step, and 8 at the prediction step.
+
+Default plots show: (1 top left) the mean variable importance in decreasing order (black line) and threshold value (red line) for the elimination step; (2 top right) the standard deviation of variable importance (black line) with predictions given by a classification tree fitted to the standard deviations (green line) and the minimum value of classification tree predictions used to determine the threshold in the elimination step (red line); (3 bottom left) the out-of-bag error rates of nested random forests with the red line highlighting the retained model in the interpretation step; and (4 bottom right) the out-of-bag error rates of random forest models grown stepwise with an increasing number of variables in the prediction step (Genuer et al. 2019). We can access the names of the variables selected at each step and create formulas for subsequent use in random forests.
+
+```{r}
+# Create vector of variables selected after threshold step
+phyto.site.mods.vsurf.thres <- phyto.site.mods.vsurf$varselect.thres
+phyto.site.mods.vsurf.thres.names <- names[phyto.site.mods.vsurf.thres]
+
+# Create formula with variables selected after threshold strep
+phyto.site.mods.vsurf.thres.fmla <- as.formula(paste("Mods ~ ", paste(phyto.site.mods.vsurf.thres.names, collapse = "+")))
+
+# Create vector of variables selected after interpretation step
+phyto.site.mods.vsurf.interp <- phyto.site.mods.vsurf$varselect.interp
+phyto.site.mods.vsurf.interp.names <- names[phyto.site.mods.vsurf.interp]
+phyto.site.mods.vsurf.interp.names
+
+# Create formula with variables selected after interpretation strep
+phyto.site.mods.vsurf.interp.fmla <- as.formula(paste("Mods ~ ", paste(phyto.site.mods.vsurf.interp.names, collapse = "+")))
+
+# Create vector of variables selected after prediction step
+phyto.site.mods.vsurf.pred <- phyto.site.mods.vsurf$varselect.pred
+phyto.site.mods.vsurf.pred.names <- names[phyto.site.mods.vsurf.pred]
+phyto.site.mods.vsurf.pred.names
+
+# Create formula with variables selected after prediction strep
+phyto.site.mods.vsurf.pred.fmla <- as.formula(paste("Mods ~ ", paste(phyto.site.mods.vsurf.pred.names, collapse = "+")))
+```
+
+Another method for variable selection is to rank predictors based on the minimal depths of their maximal subtrees. Here, a variable's maximal subtree is the largest subtree whose root node splits on the variable (and thus the largest possible maximal subtree grows from the entire tree's root node). Minimal depth is the shortest distance from the root of the entire tree to the root of the variable's closest maximal subtree, where smaller depths indicate more impact on prediction. Calculated for each predictor, variables are selected with minimal depths shallower than the mean depth across all predictors (Ishwaran et al. 2010). This approach can be implemented using the `var.select` function in the `randomForestSRC` package (Ishwaran & Kogalur 2021), independent of the method used to measure prediction error and avoiding the need to rank variables in order of their importance (elimination based on mean threshold).
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Use randomForestSRC to perform minimal depth variable selection
+set.seed(99)
+phyto.site.mods.md <- var.select(phyto.site.mods.all.fmla,
+                                 data = phyto.site.mods,
+                                 ntree = 20000,
+                                 method = "md",
+                                 splitrule = "gini",
+                                 nsplit = 0,
+                                 importance = "permute",
+                                 na.action = "na.impute",
+                                 block.size = 1)
+
+# Create data frame of maximal subtree information
+phyto.site.mods.md.order <- as.data.frame(phyto.site.mods.md[["md.obj"]][["order"]])
+phyto.site.mods.md.order$Variable <- row.names(phyto.site.mods.md.order)
+```
+
+```{r}
+# Find minimal depth threshold
+phyto.site.mods.md$md.obj$threshold
+
+# Create vector of variables selected by minimal depth
+phyto.site.mods.md.topvars <- phyto.site.mods.md$topvars
+
+# Create formula with variables selected by minimal depth
+phyto.site.mods.md.topvars.fmla <- as.formula(paste("Mods ~ ", paste(phyto.site.mods.md.topvars, collapse = "+")))
+```
+
+```{r}
+# Load library
+library(ggplot2)
+```
+
+```{r, fig.width=6, fig.height=8}
+# Plot minimal depths and selection threshold
+phyto.site.mods.md.order %>%
+  ggplot(aes(x = V1, y = reorder(Variable, -V1))) +
+  geom_vline(xintercept = phyto.site.mods.md[["md.obj"]][["threshold"]], linetype = "dashed", 
+             color = "grey", size = 0.5) +
+  labs(y = "Variables", x = "Minimal depth") +
+  geom_point() +
+  theme_test()
+```
+
+While both the permutation-based and maximal subtree-based methods offer effective variable selection, they may choose different sets of variables. Here, we can see that the maximal subtree-based method selected 11 variables with minimal depths shallower than the mean threshold of 5.23, with surface water temperature and lake area:perimeter ratio ranked highest. Retained variables are most similar to those selected for prediction in the VSURF approach.
+
+<a name="section2.3"></a>
+
+## 2.3 Growing the forest
+
+We will generate a random forest using the environmental attributes of sites to predict their classification. Specifically, we will use those variables selected by the minimal depth method and apply a mostly default setup, setting the number of candidate variables randomly selected for splitting at a given node to the square root of the total number of predictors (6) and setting the training data for each tree by sampling 63.2% of the sites without replacement (45). As I noted above, each tree is constructed with a bootstrap sample of observations, leaving the remaining (out-of-bag) data for internal cross-validation to estimate prediction error. We will also set the block size to 1, such that cumulative error rates (and variable importance estimates) are calculated on every tree, providing greater accuracy at the cost of computation time. Finally, we will set the number of trees to 20,000, allow imputation of missing data, and require deterministic splitting (rather setting a certain number of random splits for each candidate variable). Deterministic splitting should create more accurate trees, but again, comes with the cost of greater computation time. By default, splits are chosen to minimize the Gini (impurity) index in classification trees, which varies between 0 and 1, with 0 representing perfect classification. We will use the core `rfsrc` function from the `randomForestSRC` package (Ishwaran & Kogalur 2021).
+
+```{r}
+# Generate random forest using variables selected by minimal depth
+set.seed(99)
+site.mod.forest <- rfsrc(phyto.site.mods.md.topvars.fmla,
+                         data = phyto.site.mods,
+                         ntree = 20000, #sets number of independent decisions trees to generate for ensemble
+                         splitrule = "gini", #defaults to Gini index
+                         nsplit = 0, #0 sets deterministic splitting
+                         importance = "permute", #for permutation-based variable importance
+                         na.action = "na.impute", #permits imputing missing data
+                         block.size = 1) #sets how often cumulative error rate is estimated and block size for VIMP
+
+print(site.mod.forest)
+```
+
+Overall, the missclassification rate is 50%, which is not great (suggesting that sites are predicted correctly just half the time) and the area under the ROC curve (AUC) is only 0.51 (suggesting poor discrimination). However, looking at the confusion matrix, we see considerable variation in predictive accuracy for the different classes. Specifically, we see that rarer classes (Mods 03, 04, and 05) are completely missed by the model (100% error rate), whereas dominate/majority modules (especially 02 and 06) have reasonably good error rates (17.86 and 37.50%, respectively). These results highlight the sensitivity of random forests to imbalanced designs, as classification will be biased towards the most common classes that are more likely to be selected in bootstrap samples. While not a perfect solution, prediction of minority classes can sometimes be improved by weighting them more highly at splits (giving less penalty for missclassifying minority classes) or in bootstrap samples (selecting data from the minority classes with higher probability), both at the cost of reduced prediction for the majority classes (and possibly overall). Alternative splitting rules can also be applied, for instance optimizing AUC rather than minimizing Gini impurity.
+
+We can further show the cumulative error rate, both overall and for individual classes, as a function of the number of random trees generated. This helps us visualize the predictive strengths/weaknesses of the forest, and can tell us whether we have generated enough trees for error rates to stabilize.
+
+```{r}
+# Create data frame of error rates as a function of number of trees
+site.mod.forest.err.rate <- as.data.frame(site.mod.forest$err.rate)
+site.mod.forest.err.rate$Tree <- rownames(site.mod.forest.err.rate)
+site.mod.forest.err.rate$Tree <- as.numeric(site.mod.forest.err.rate$Tree)
+
+# Pivot data from wide to long
+site.mod.forest.err.rate.long <- pivot_longer(site.mod.forest.err.rate, !Tree, names_to = "Mod", values_to = "Error.rate")
+```
+
+```{r, fig.width=6, fig.height=4}
+# Plot overall error rate as a function of number of trees
+site.mod.forest.err.rate.long %>%
+  filter(Mod == "all") %>%
+  ggplot(aes(x = Tree, y = Error.rate, colour = factor(Mod))) +
+  geom_path() +
+  theme_bw() +
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+```{r, fig.width=8, fig.height=6}
+# Plot error rates for individual classes as a function of number of trees
+site.mod.forest.err.rate.long %>%
+  filter(Mod != "all") %>%
+  ggplot(aes(x = Tree, y = Error.rate, colour = factor(Mod))) +
+  geom_path() +
+  theme_bw() +
+  theme(legend.position='none') +
+  facet_grid(rows = vars(Mod))
+```
+
+Here, we can see that error rates converged before we reach 10,000 trees, indicating that subsequent iterations were largely redundant.
+
+We can also show the recursive, binary splitting behaviour of the algorithm by visualizing a single tree from the forest. While single trees grown from a random subset of the data should not be used for interpretation or prediction, they can be helpful for illustrating how the algorithm works to partition data into smaller and smaller sets based on variable thresholds.
+
+```{r, fig.width=10, fig.height=10}
+# Select a single tree from the random forest
+plot(get.tree.rfsrc(site.mod.forest, tree.id = 8000, class.type = "bayes"))
+```
+
+<a name="section2.4"></a>
+
+## 2.4 Variable dependence
+
+In addition to prediction, random forests can be useful for interpreting relationships between variables. For example, variable importance can be estimated by permutation (or other) procedures to show the relative predictive value of covariates, both overall and for individual classes. Permutation-based variable importance involves the 'noising up' of variables to reveal change in error rates, as described above (section 2.2).
+
+```{r}
+# Create data frame of variable importance estimates
+site.mod.forest.vimp <- as.data.frame(site.mod.forest$importance)
+site.mod.forest.vimp$Variable <- row.names(site.mod.forest.vimp)
+
+# Order variables (and relevel) by unconditional importance
+site.mod.forest.vimp$Variable <-  as.factor(site.mod.forest.vimp$Variable)
+site.mod.forest.vimp <- site.mod.forest.vimp[order(site.mod.forest.vimp$all), ]
+order <- as.character(site.mod.forest.vimp$Variable)
+site.mod.forest.vimp$Variable <- fct_relevel(site.mod.forest.vimp$Variable, order)
+
+# Pivot data from wide to long
+site.mod.forest.vimp.long <- pivot_longer(site.mod.forest.vimp, !Variable, names_to = "Mod", values_to = "Vimp")
+```
+
+```{r, fig.width=6, fig.height=4}
+# Plot overal variable importance based on permutation (noising up the data)
+site.mod.forest.vimp.long %>%
+  filter(Mod == "all") %>%
+  ggplot(aes(x = Vimp, y = Variable, fill = Mod)) +
+  geom_col() +
+  labs(x = "Importance", y = "Variables", fill = "Module") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+```{r, fig.width=10, fig.height=4}
+# And for individual classes
+site.mod.forest.vimp.long %>%
+  filter(Mod != "all") %>%
+  ggplot(aes(x = Vimp, y = Variable, fill = Mod)) +
+  geom_col() +
+  labs(x = "Importance", y = "Variables", fill = "Module") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+We can see that total monthly precipitation, surface water temperatures, density of watercourse crossings, sum buoyancy frequency (which is related to water column stability/stratification), catchment area, and lake area:perimeter ratio were the top variables overall. However, the importance of predictors differed across classes. Here, total monthly precipitation, surface water temperatures, and sum buoyancy frequency were the most important for module 02 (which had the best classification success), suggesting that late summer thermal regime and water column stability may be important factors determining the occurrence of this dominant community type. Module 06, which had the second best prediction accuracy, was relatively more related to the density of watercourse crossings and lake area:perimeter ratio. Module 01 was predicted by surface water temperatures, lake area:perimeter ratio, and magnesium (which services as an indicator of ion chemistry), while variable importance was largely negative for modules 03-05, indicating that the variables did not help predict these classes (which each had 100% error rates).
+
+We can further interpret these relationships by plotting the predicted probability of a given class as a function of individual predictors. For example, lets take a closer look at the marginal predicted probability for a site being classified as belonging to module 02.
+
+```{r, fig.width=10, fig.height=10}
+# Generate marginal plots showing relationships between each predictor and the predicted probability of module 02
+plot.variable.rfsrc(site.mod.forest, partial = FALSE, target = "Mod02")
+```
+
+These plots highlight the strengths of random forests for detecting nonlinear effects. Plots show marginal relationships, with increasing probability of a site being classified as belonging to module 02 along the y-axis as a function of increasing predictor values. We find several potentially non-linear relationships, including non-monotonic/hump-shaped trends with sum buoyancy frequency, spring air temperature, and calcium concentrations (where probability is greatest at intermediate values) as well as threshold responses for surface water temperature (where probability increases at about 20 °C) and water course crossing density (where the effect levels off at higher densities).
+
+We can also present partial relationships, which are adjusted to integrate out the effects of non-target covariates.
+
+```{r, fig.width=10, fig.height=10}
+# Generate partial plots showing relationships between each predictor and the predicted probability of module 02
+plot.variable.rfsrc(site.mod.forest, partial = TRUE, target = "Mod02", npts = nrow(phyto.site.mods))
+```
+
+While the partial plots show similar patterns to those based on marginal effects, some relationships are changed when partialing out other variables (e.g. monthly solar radiation). These plots also show the distribution of values along the x-axes, revealing parts of variable relationships with fewer data points and thus less certainty.
+
+<a name="section2.5"></a>
+
+## 2.5 Finding variable interactions
+
+Random forests can also be used to reveal variable interactions. One method, based on joint-variable permutation, adds the individual permutation-based importance of predictor pairs and compares this additive null to the change in error when both variables are permuted simultaneously. Here, greater differences between the paired and additive importance estimates indicate probable interactions. 
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Finding interacting variables using joint permutation-based variable importance
+set.seed(99)
+site.mod.forest.int.vimp <- find.interaction(site.mod.forest, method = "vimp", importance = "permute", 
+                                             na.action = "na.impute", nrep = 20)
+```
+
+```{r}
+# Show top five interactions
+head(as.data.frame(site.mod.forest.int.vimp) %>% arrange(-abs(Difference)), 5)
+```
+
+A second method, based on maximal subtrees, finds the conditional minimal depths of variables with respect to the maximal subtrees of other variables (with shorter distances between predictive variables indicating probable interactions).
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Finding interacting variables using conditional minimal depths
+set.seed(99)
+site.mod.forest.int.mt <- find.interaction(site.mod.forest, method = "maxsubtree", 
+                                           na.action = "na.impute")
+```
+
+```{r}
+# Show top five interactions with the top two most predictive values (based on minimal depths) 
+head(as.data.frame(site.mod.forest.int.mt[, 1:2]) %>% arrange(), 5)
+```
+
+One potential interaction is between surface water temperature and sum buoyancy frequency, which can be visualized with conditioning (co)plots. As these are both continuous variables, we will stratify the data into six classes of sum buoyancy frequency with approximately equal size (number of observations) using the `classInt` package (Bivand 2020).
+
+```{r}
+# Load library
+library(classInt)
+
+# Find 6 classes of sum buoyancy frequency with approximately equal size (number of observations)
+sum.buoyancy.frequency.classes <- classIntervals(site.mod.forest$xvar$Sum.buoyancy.frequency,  
+                                                 n = 6, style = "quantile", include.lowest = T)
+
+# Create sum buoyancy frequency interval classes 
+sbf.grp <- cut(site.mod.forest$xvar$Sum.buoyancy.frequency, breaks = sum.buoyancy.frequency.classes$brks, 
+               include.lowest = T, ordered_result = TRUE)
+
+# Obtain predicted out-of-bag probabilities for module 02
+probmod02 <- as.data.frame(site.mod.forest$predicted.oob[, 2])
+probmod02 <- mutate(probmod02, as.data.frame(site.mod.forest$xvar))
+colnames(probmod02)[1] <- "Probability.Mod02"
+
+# Add sum buoyancy frequency interval classes to predicted probability data
+probmod02$sbf.grp <- sbf.grp
+
+# Rename group classes
+levels(probmod02$sbf.grp) <- paste("Buoyancy ", levels(probmod02$sbf.grp), sep="")
+```
+
+```{r, fig.width=8, fig.height=6}
+# Generate coplots showing marginal predicted probability of module 02 as a function of surface water temperature in different classes of buoyancy frequency
+ggplot(probmod02, aes(x = Surface.water.temperature, y = Probability.Mod02, color = sbf.grp)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  labs(x = "Surface water temperature °C", y = "Probability Mod02") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_wrap(vars(sbf.grp))
+```
+
+We have used simple linear regression to estimate the slope of the relationship between the predicted probability of module 02 and surface water temperature in different intervals of buoyancy frequency. While probability increased with temperatures in more stratified lakes, we see that temperature is not associated with module 02 at lower buoyancy frequencies (reflecting relatively shallow and/or well-mixed water bodies with little if any stratification). Coplots can also be used to show partial relationships (adjusting for the effects of other variables) as we illustrated in section 2.4 (see the `ggRandomForests` package for a useful function for obtaining partial coplots and other visuals; Ehrlinger 2016).
+
+<a name="section3"></a>
+
+## 3 Assessing trait predictors of communities
+
+We can perform the same set of operations building a random forest to reveal trait predictors of species assemblages. Let's start by examining predictor correlations.
+
+```{r}
+# Obtain simple correlation matrix from environmental candidate variables
+phyto.sp.mods.cor <- cor(traits)
+```
+
+```{r, fig.width=8, fig.height=8}
+# Obtain a quick plot using corrplot with order of variables based on first principal component
+phyto.sp.mods.cor.plot <- corrplot(phyto.sp.mods.cor, method = 'circle', 
+                                   type = "upper", order = 'FPC', diag = FALSE)
+```
+
+Unsurprisingly, we find correlation among several traits associated with cyanobacteria (such as suspected toxin production, buoyancy regulation, and nitrogen fixation). We also see some correlation among traits for heterotrophy, flagellar motility, silica requirement, spine formation, and chlorophyll _c_ pigmentation (traits of diatoms, ochrophytes, cryptomonads, and dinoflagellates), which were negatively correlated with chlorophyll _b_ pigmented green algae. Given this multicollinearity, it is useful to perform variable selection.
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Create formula with all possible variables
+sp.names <- colnames(traits)
+phyto.sp.mods.all.fmla <- as.formula(paste("Mods ~ ", paste(sp.names, collapse = "+")))
+
+# Use randomForestSRC to perform minimal depth variable selection
+set.seed(99)
+phyto.sp.mods.md <- var.select(phyto.sp.mods.all.fmla,
+                               data = phyto.sp.mods,
+                               ntree = 20000,
+                               method = "md",
+                               splitrule = "gini",
+                               nsplit = 0,
+                               importance = "permute",
+                               na.action = "na.impute",
+                               block.size = 1)
+
+# Create data frame of maximal subtree information
+phyto.sp.mods.md.order <- as.data.frame(phyto.sp.mods.md[["md.obj"]][["order"]])
+phyto.sp.mods.md.order$Variable <- row.names(phyto.sp.mods.md.order)
+```
+
+```{r}
+# Find minimal depth threshold
+phyto.sp.mods.md$md.obj$threshold
+
+# Create vector of variables selected by minimal depth
+phyto.sp.mods.md.topvars <- phyto.sp.mods.md$topvars
+
+# Create formula with variables selected by minimal depth
+phyto.sp.mods.md.topvars.fmla <- as.formula(paste("Mods ~ ", paste(phyto.sp.mods.md.topvars, collapse = "+")))
+```
+
+```{r, fig.width=6, fig.height=8}
+# Plot minimal depths and selection threshold
+phyto.sp.mods.md.order %>%
+  ggplot(aes(x = V1, y = reorder(Variable, -V1))) +
+  geom_vline(xintercept = phyto.sp.mods.md[["md.obj"]][["threshold"]], linetype = "dashed", 
+             color = "grey", size = 0.5) +
+  labs(y = "Variables", x = "Minimal depth") +
+  geom_point() +
+  theme_test()
+```
+
+Once again, 10 variables were selected based on their minimal depths from maximal subtrees exceeding a threshold of 5.69. Here, GALD (or greatest axial linear dimension) was the most predictive variable, suggesting a potentially important role of cell size in community differentiation. 
+
+```{r}
+# Generate random forest using variables selected by minimal depth
+set.seed(99)
+sp.mod.forest <- rfsrc(phyto.sp.mods.md.topvars.fmla,
+                       data = phyto.sp.mods,
+                       ntree = 20000,
+                       splitrule = "gini",
+                       nsplit = 0,
+                       importance = "permute",
+                       na.action = "na.impute",
+                       block.size = 1)
+
+print(sp.mod.forest)
+```
+
+However, the misclassification rate for the random forest constructed from these variables was 72% and the AUC was 0.59, indicating relatively poor predictive importance. Once again, error rates varied by class. Here, the best prediction was for module 06, which was correctly classified a little under half the time. 
+
+```{r}
+# Create data frame of error rate as a function of number of trees
+sp.mod.forest.err.rate <- as.data.frame(sp.mod.forest$err.rate)
+sp.mod.forest.err.rate$Tree <- rownames(sp.mod.forest.err.rate)
+sp.mod.forest.err.rate$Tree <- as.numeric(sp.mod.forest.err.rate$Tree)
+
+# Pivot data from wide to long
+sp.mod.forest.err.rate.long <- pivot_longer(sp.mod.forest.err.rate, !Tree, names_to = "Mod", values_to = "Error.rate")
+```
+
+```{r, fig.width=6, fig.height=4}
+# Plot overall error rate as a function of number of trees
+sp.mod.forest.err.rate.long %>%
+  filter(Mod == "all") %>%
+  ggplot(aes(x = Tree, y = Error.rate, colour = factor(Mod))) +
+  geom_path() +
+  theme_bw() +
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+```{r, fig.width=8, fig.height=6}
+# Plot error rates for individual classes as a function of number of trees
+sp.mod.forest.err.rate.long %>%
+  filter(Mod != "all") %>%
+  ggplot(aes(x = Tree, y = Error.rate, colour = factor(Mod))) +
+  geom_path() +
+  theme_bw() +
+  theme(legend.position='none') +
+  facet_grid(rows = vars(Mod))
+```
+
+Relatively poorer prediction accuracy was reflected by relatively greater fluctuation in cumulative error rates as additional trees were added to the forest. This was especially apparent in the cumulative error rates overall and for module 06, though both appear to have eventually converged.
+
+```{r, fig.width=10, fig.height=10}
+# Select a single tree from the random forest
+plot(get.tree.rfsrc(sp.mod.forest, tree.id = 5000, class.type = "prob"))
+```
+
+Again, we can pull a single tree from the random forest to illustrate its branching structure. Here, we see greater tree complexity than for the site tree, reflecting the larger number of species than the number of sites in our dataset.
+
+```{r}
+# Create data frame of variable importance estimates
+sp.mod.forest.vimp <- as.data.frame(sp.mod.forest$importance)
+sp.mod.forest.vimp$Variable <- row.names(sp.mod.forest.vimp)
+
+# Order variables (and relevel) by unconditional importance
+sp.mod.forest.vimp$Variable <-  as.factor(sp.mod.forest.vimp$Variable)
+sp.mod.forest.vimp <- sp.mod.forest.vimp[order(sp.mod.forest.vimp$all), ]
+order <- as.character(sp.mod.forest.vimp$Variable)
+sp.mod.forest.vimp$Variable <- fct_relevel(sp.mod.forest.vimp$Variable, order)
+
+# Pivot data from wide to long
+sp.mod.forest.vimp.long <- pivot_longer(sp.mod.forest.vimp, !Variable, names_to = "Mod", values_to = "Vimp")
+```
+
+```{r, fig.width=6, fig.height=4}
+# Plot overal variable importance based on permutation (noising up the data)
+sp.mod.forest.vimp.long %>%
+  filter(Mod == "all") %>%
+  ggplot(aes(x = Vimp, y = Variable, fill = Mod)) +
+  geom_col() +
+  labs(x = "Importance", y = "Variables", fill = "Module") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+```{r, fig.width=10, fig.height=4}
+# And for individual classes
+sp.mod.forest.vimp.long %>%
+  filter(Mod != "all") %>%
+  ggplot(aes(x = Vimp, y = Variable, fill = Mod)) +
+  geom_col() +
+  labs(x = "Importance", y = "Variables", fill = "Module") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_grid(cols = vars(Mod))
+```
+
+Permutation-based variable importance estimates largely supported those based on minimal depths of maximal subtrees, indicating a leading role for greater axial linear dimension. GALD was especially informative for modules 01, 04, and 06, which were among the best predicted community types, though it actually contributed to worse (negative) prediction of modules 02 and 05. The best predicted module (mod06) was also related to chlorophyll _b_ pigmentation.
+
+```{r, fig.width=10, fig.height=10}
+# Generate marginal plots showing the total importance of each predictor for module 06
+plot.variable.rfsrc(sp.mod.forest, partial = FALSE, target = "Mod06")
+```
+
+```{r, fig.width=10, fig.height=10}
+# Generate partial plots showing the unique importance of each predictor for module 06
+plot.variable.rfsrc(sp.mod.forest, partial = TRUE, target = "Mod06", npts = nrow(phyto.sp.mods))
+```
+
+Focusing in on module 06, we can see it has a somewhat noisy relationship with GALD, but is clearly structured by chlorophyll _b_ pigmentation, lack of phycobilins, ability to obtain nutrition from the consumption/adsorption of complex organic substrances (i.e. heterotrophy), and possibly a capacity for chain/colony formation.  
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Finding interacting variables using joint permutation-based variable importance
+set.seed(99)
+sp.mod.forest.int.vimp <- find.interaction(sp.mod.forest, method = "vimp", importance = "permute",
+                                           na.action = "na.impute", nrep = 20)
+```
+
+```{r}
+# Show top five interactions
+head(as.data.frame(sp.mod.forest.int.vimp) %>% arrange(-abs(Difference)), 5)
+```
+
+```{r, results="hide", message=FALSE, error=FALSE, warning=FALSE}
+# Finding interacting variables using conditional minimal depths
+set.seed(99)
+sp.mod.forest.int.mt <- find.interaction(sp.mod.forest, method = "maxsubtree",
+                                         na.action = "na.impute")
+```
+
+```{r}
+# Show top five interactions with the top two most predictive values (based on minimal depths) 
+head(as.data.frame(sp.mod.forest.int.mt[, 1:2]) %>% arrange(), 5)
+```
+
+The top interaction identified by joint permutation was that of GALD and suspected toxin production. Given the potential functional and human health implications of toxin production, lets look at this relationship more closely.
+
+```{r}
+# Obtain predicted out-of-bag probabilities for module 06
+probmod06 <- as.data.frame(sp.mod.forest$predicted.oob[, 2])
+probmod06 <- mutate(probmod06, as.data.frame(sp.mod.forest$xvar))
+colnames(probmod06)[1] <- "Probability.Mod06"
+
+# Rename group classes
+probmod06["SUSPECTED_TOXIN_PRODUCING"][probmod06["SUSPECTED_TOXIN_PRODUCING"] == "1"] <- "Toxin producers"
+probmod06["SUSPECTED_TOXIN_PRODUCING"][probmod06["SUSPECTED_TOXIN_PRODUCING"] == "0"] <- "Not toxin producers"
+```
+
+```{r, fig.width=8, fig.height=6}
+# Generate coplots showing marginal predicted probability of module 06 as a function of greatest axial dimension in suspected toxin producers and non-producers
+ggplot(probmod06, aes(x = GALD, y = Probability.Mod06, color = SUSPECTED_TOXIN_PRODUCING)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  labs(x = "Greatest axial linear dimension", y = "Probability mod06") +
+  theme_bw() + 
+  theme(legend.position='none') +
+  facet_wrap(vars(SUSPECTED_TOXIN_PRODUCING))
+```
+
+Here, we see some evidence for greater probability of species being assigned to module 06 with species size among non-toxin producers contrasting a negative association with size in toxin producers. However, neither relationship is very strong and the group of toxin producers make up a narrow range of body sizes, making any relationships tenuous.
+
+<a name="section4"></a>
+
+## 4 Final thoughts
+
+We showed how random forests can be applied to classification problems in ecology, providing variable selection and inference of nonlinear relationships involving environmental and trait drivers of community differentiation. Several findings, such as the important roles of surface water temperatures, stratification, and lake morphometry (i.e. lake area:perimeter ratio) in community differentiation support past findings on the drivers of beta diversity in this system (Loewen et al. 2020). However, it also identified important roles for precipitation patterns and watercourse crossing densities that are less understood. Interestingly, these two factors were strongly correlated, suggesting they may covary in space. The importance of greatest axial linear dimensions also contrasted past research in this system (Loewen et al. 2021), which did not uncover any environmental associations with GALD. Here, the importance of GALD is likely more related to its role in mediating species interactions (e.g. susceptibility to herbivory), rather than tolerance of environmental filters.
+
+We also highlight several advantages and limitations of the random forest method. By aggregating insights across several thousand trees with internal cross-validation, random forests overcome the variance of single trees and provides a useful means of prediction. Here, our models could be provided new data, in a different region or for future environmental conditions, and used to predict how the distributions of communities might change. Though as with any extrapolation, the further out we predict the less certain our predictions will be. Random forests, being a non-parametric approach, are also useful for revealing nonlinearities and interactions that can be challenging to detect with traditional methods. However, we also identified several limitations, including challenges with correlated predictors and imbalanced data. Here, random forests may struggle to choose among correlated factors and bias prediction towards majority classes. We point to potential solutions that can help with these issues, including variable selection and weighted random forests. Ultimately though, our analysis would have benefited from a larger sample size (especially for rare classes). Further, because random forests are intrinsically stochastic (based on a random process), it is good practice to conduct sensitivity analysis by generating multiple forests with different seeds to see whether findings differ in any important ways between runs. Random forest are also applicable to regression problems, where splits can be performed to optimize mean square error of subgroups rather than classification success, as well as multivariate responses. In either case, random forests are a valuable asset to any ecologist's toolbox, especially for exploratory analysis of large data sets with many predictors and potential nonlinearities.
+
+<a name="section5"></a>
+
+## 5. References
+
+Bivand, R. (2020). classInt: choose univariate class intervals. R package version 0.4-3. https://CRAN.R-project.org/package=classInt
+
+Breiman, L. (2001). Random forests. _Machine Learning_, __45__, 5-32
+
+Ehrlinger, J. (2016). ggRandomForests: visually exploring random forests. R package version 2.0.1. https://CRAN.R-project.org/package=ggRandomForests
+
+Genuer, R., Poggi, J-M., & Tuleau-Malot, C. (2015). VSURF: an R package for variable selection using random forests. _The R Journal_, __2__, 19-33.
+
+Genuer, R., Poggi, J-M., & Tuleau-Malot, C. (2019). VSURF: Variable Selection Using Random Forests. R package version 1.1.0. https://CRAN.R-project.org/package=VSURF
+
+Ishwaran, H., Kogalur, U.B., Gorodeski, E.Z., Minn, A.J., & Lauer, M.S. (2010). High-dimensional variable selection for survival data. _Journal of the American Statistical Association_, __105__, 205-217.
+
+Ishwaran, H. & Kogalur, U.B. (2021). randomForestSRC: Fast Unified Random Forests for Survival, Regression, and Classification (RF-SRC), R package version 2.14.0. https://CRAN.R-project.org/package=randomForestSRC
+
+Liaw, A. & Wiener, M. (2002). Classification and regression by randomForst. _R News_, __2__, 18-22.
+
+Loewen, C.J.G., Wyatt, F.R., Mortimer, C.A., Vinebrooke, R.D., & Zurawell, R.W. (2020). Multiscale drivers of phytoplankton communities in north temperate lakes. _Ecological Applications_, __30__, e02102.
+
+Loewen. C.J.G., Vinebrooke, R.D., & Zurawell R.W. (2021). Quantifying seasonal succession of phytoplankton trait-environment associations in human-altered landscapes. _Limnology and Oceanography_, __66__, 1409-1423.
+
+Speiser, J.L., Miller, M.E., Tooze, J., & Ip, E. (2019). A comparison of random forest variable selection methods for classification prediction modeling. _Expert Systems with Applications_, __134__, 93-101.
+
+Wickham, H. (2016). ggplot2: elegant graphics for data analysis. _Springer-Verlag_, New York.
+
+Wickham, H., Averick, M., Bryan, J., Chang, W., McGowan, L.D., François, R., Grolemund, G., Hayes, A., Henry, L., Hester, J., Kuhn, M., Pedersen, T.L., Miller, E., Bache, S.M., Müller, K., Ooms, J., Robinson, D., Seidel, D.P., Spinu, V., Takahashi, K., Vaughan, D., Wilke, C., Woo, K., & Yutani, H. (2019). Welcome to the tidyverse. _Journal of Open Source Software_, __4__, 1686.
+
